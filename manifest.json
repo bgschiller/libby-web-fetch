@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Libby Audiobook Downloader",
+  "version": "1.0.0",
+  "description": "Download audiobooks from Overdrive/Libby",
+  "permissions": [
+    "webRequest",
+    "declarativeNetRequest",
+    "downloads",
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "*://*.listen.overdrive.com/*",
+    "*://odrmediaclips.cachefly.net/*",
+    "*://audioclips.cdn.overdrive.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.svg",
+      "48": "icons/icon48.svg",
+      "128": "icons/icon128.svg"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.svg",
+    "48": "icons/icon48.svg",
+    "128": "icons/icon128.svg"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.listen.overdrive.com/*"],
+      "js": ["src/content.js"]
+    }
+  ]
+}

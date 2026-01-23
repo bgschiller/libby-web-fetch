@@ -109,6 +109,11 @@ async function init() {
       expectedDuration = bookInfo.totalDurationFormatted || "";
     }
 
+    const expectedFilesEl = $("expected-files");
+    if (expectedFilesEl) {
+      expectedFilesEl.textContent = bookInfo.expectedFiles > 0 ? String(bookInfo.expectedFiles) : "--";
+    }
+
     if (folderInput) {
       folderInput.value = toKebabCase(bookInfo.title);
       currentKebabTitle = folderInput.value;

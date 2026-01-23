@@ -4,6 +4,10 @@
 // Content script for Libby audiobook pages
 
 let isScrubbing = false;
+/** @type {HTMLElement|null} */
+let progressBanner = null;
+/** @type {number} */
+let totalExpectedFiles = 0;
 /** @type {number|null} */
 let scrubInterval = null;
 /** @type {number} */
@@ -323,6 +327,9 @@ async function startScrubbing() {
   totalDurationSeconds = 0;
 
   console.log("[libby-fetch] Starting scrubbing process (15 second advances)");
+  
+  // Create progress banner on the page
+  createProgressBanner();
 
   // Restart the audiobook from the beginning
   await restartAudiobook();
@@ -383,13 +390,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case "GET_BOOK_INFO": {
       const timeInfo = getTimeInfo();
-      sendResponse({
-        title: getBookTitle(),
-        progress: getProgressPercent(),
-        totalDurationSeconds: timeInfo.totalSeconds,
-        totalDurationFormatted: formatDuration(timeInfo.totalSeconds),
+      // Get expected files async, then respond
+      getTotalExpectedFiles().then(expectedFiles => {
+        sendResponse({
+          title: getBookTitle(),
+          progress: getProgressPercent(),
+          totalDurationSeconds: timeInfo.totalSeconds,
+          totalDurationFormatted: formatDuration(timeInfo.totalSeconds),
+          expectedFiles: expectedFiles,
+        });
       });
-      break;
+      return true; // Keep channel open for async response
     }
 
     case "START_SCRUBBING":
@@ -399,11 +410,180 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case "STOP_SCRUBBING":
       stopScrubbing();
+      removeProgressBanner();
+      sendResponse({ success: true });
+      break;
+      
+    case "DOWNLOAD_PROGRESS":
+      updateProgressBanner(message.fileCount, message.percent || 0);
+      if (!message.isDownloading && message.fileCount > 0) {
+        showCompleteBanner(message.fileCount);
+      }
       sendResponse({ success: true });
       break;
   }
 
   return true;
 });
+
+/**
+ * Get the total number of audio files from window.BIF
+ * Asks background script to read from page context using chrome.scripting
+ * @returns {Promise<number>}
+ */
+function getTotalExpectedFiles() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "GET_EXPECTED_FILES" }, (response) => {
+      resolve(response?.expectedFiles || 0);
+    });
+  });
+}
+
+/**
+ * Create or update the progress banner at the top of the page
+ */
+async function createProgressBanner() {
+  if (progressBanner) return;
+  
+  totalExpectedFiles = await getTotalExpectedFiles();
+  console.log("[libby-fetch] Expected files:", totalExpectedFiles);
+  
+  progressBanner = document.createElement('div');
+  progressBanner.id = 'libby-fetch-progress';
+  progressBanner.innerHTML = `
+    <style>
+      #libby-fetch-progress {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 999999;
+        background: linear-gradient(135deg, #1a73e8 0%, #0d47a1 100%);
+        color: white;
+        padding: 12px 20px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+      }
+      #libby-fetch-progress .lfp-left {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      #libby-fetch-progress .lfp-spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top-color: white;
+        border-radius: 50%;
+        animation: lfp-spin 1s linear infinite;
+      }
+      @keyframes lfp-spin {
+        to { transform: rotate(360deg); }
+      }
+      #libby-fetch-progress .lfp-status {
+        font-weight: 500;
+      }
+      #libby-fetch-progress .lfp-details {
+        opacity: 0.9;
+        font-size: 13px;
+      }
+      #libby-fetch-progress .lfp-stop {
+        background: rgba(255,255,255,0.2);
+        border: 1px solid rgba(255,255,255,0.3);
+        color: white;
+        padding: 6px 16px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+        transition: background 0.2s;
+      }
+      #libby-fetch-progress .lfp-stop:hover {
+        background: rgba(255,255,255,0.3);
+      }
+      #libby-fetch-progress.lfp-complete {
+        background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%);
+      }
+    </style>
+    <div class="lfp-left">
+      <div class="lfp-spinner"></div>
+      <div>
+        <div class="lfp-status">Downloading audiobook...</div>
+        <div class="lfp-details">
+          <span class="lfp-files">0</span> files
+          <span class="lfp-expected">${totalExpectedFiles > 0 ? ` / ${totalExpectedFiles} expected` : ''}</span>
+          · <span class="lfp-percent">0%</span> through book
+        </div>
+      </div>
+    </div>
+    <button class="lfp-stop">Stop</button>
+  `;
+  
+  document.body.appendChild(progressBanner);
+  
+  // Add stop button handler
+  progressBanner.querySelector('.lfp-stop')?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: "STOP_DOWNLOAD" });
+    removeProgressBanner();
+  });
+}
+
+/**
+ * Update the progress banner
+ * @param {number} fileCount
+ * @param {number} percent
+ */
+function updateProgressBanner(fileCount, percent) {
+  if (!progressBanner) return;
+  
+  const filesEl = progressBanner.querySelector('.lfp-files');
+  const percentEl = progressBanner.querySelector('.lfp-percent');
+  
+  if (filesEl) filesEl.textContent = String(fileCount);
+  if (percentEl) percentEl.textContent = Math.round(percent * 100) + '%';
+}
+
+/**
+ * Show completion state in the banner
+ * @param {number} fileCount
+ */
+function showCompleteBanner(fileCount) {
+  if (!progressBanner) return;
+  
+  progressBanner.classList.add('lfp-complete');
+  
+  const spinner = progressBanner.querySelector('.lfp-spinner');
+  if (spinner) spinner.style.display = 'none';
+  
+  const statusEl = progressBanner.querySelector('.lfp-status');
+  if (statusEl) {
+    const expectedNote = totalExpectedFiles > 0 && fileCount !== totalExpectedFiles
+      ? ` (expected ${totalExpectedFiles})`
+      : '';
+    statusEl.textContent = `Download complete! ${fileCount} files${expectedNote}`;
+  }
+  
+  const detailsEl = progressBanner.querySelector('.lfp-details');
+  if (detailsEl) detailsEl.style.display = 'none';
+  
+  const stopBtn = progressBanner.querySelector('.lfp-stop');
+  if (stopBtn) {
+    stopBtn.textContent = 'Dismiss';
+    stopBtn.addEventListener('click', removeProgressBanner);
+  }
+}
+
+/**
+ * Remove the progress banner
+ */
+function removeProgressBanner() {
+  if (progressBanner) {
+    progressBanner.remove();
+    progressBanner = null;
+  }
+}
 
 console.log("[libby-fetch] Content script loaded on", window.location.href);

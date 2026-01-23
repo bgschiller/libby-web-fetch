@@ -1,7 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <circle cx="8" cy="8" r="7" fill="#1a73e8"/>
-  <rect x="4" y="3" width="8" height="10" rx="1" fill="white"/>
-  <rect x="5" y="5" width="6" height="1" fill="#1a73e8"/>
-  <rect x="5" y="7" width="6" height="1" fill="#1a73e8"/>
-  <rect x="5" y="9" width="4" height="1" fill="#1a73e8"/>
+<svg width="16" height="16" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- Cloud with waveform cutouts -->
+  <path
+    d="
+      M12 44
+      C12 26, 30 18, 46 26
+      C54 10, 74 10, 82 26
+      C98 18, 116 26, 116 44
+      C128 44, 128 68, 116 68
+      H12
+      C0 68, 0 44, 12 44
+      Z
+    "
+    fill="#1a73e8"/>
+
+  <!-- Waveform bars (white cutouts) - centered in cloud -->
+  <rect x="20" y="40" width="12" height="24" rx="6" fill="white"/>
+  <rect x="38" y="32" width="12" height="32" rx="6" fill="white"/>
+  <rect x="56" y="22" width="12" height="42" rx="6" fill="white"/>
+  <rect x="74" y="32" width="12" height="32" rx="6" fill="white"/>
+  <rect x="92" y="40" width="12" height="24" rx="6" fill="white"/>
+
+  <!-- Download arrow -->
+  <rect x="52" y="72" width="20" height="30" fill="#1a73e8"/>
+  <polygon points="64,124 32,92 96,92" fill="#1a73e8"/>
 </svg>

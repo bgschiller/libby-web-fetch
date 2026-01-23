@@ -174,8 +174,8 @@ chrome.webRequest.onBeforeRequest.addListener(
       }
     );
 
-    // Notify popup of progress
-    notifyPopup();
+    // Notify popup and content script of progress
+    notifyProgress();
   },
   {
     urls: [
@@ -185,15 +185,25 @@ chrome.webRequest.onBeforeRequest.addListener(
   }
 );
 
-function notifyPopup() {
-  chrome.runtime.sendMessage({
+function notifyProgress() {
+  const message = {
     type: "DOWNLOAD_PROGRESS",
     fileCount: state.fileCount,
     percent: state.currentPercent,
     isDownloading: state.isDownloading,
-  }).catch(() => {
+  };
+  
+  // Notify popup (if open)
+  chrome.runtime.sendMessage(message).catch(() => {
     // Popup might not be open, that's fine
   });
+  
+  // Notify content script (for on-page progress banner)
+  if (state.tabId) {
+    chrome.tabs.sendMessage(state.tabId, message).catch(() => {
+      // Content script might not be ready
+    });
+  }
 }
 
 // Handle messages from popup and content script
@@ -201,6 +211,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log("[libby-fetch] Received message:", message);
 
   switch (message.type) {
+    case "GET_EXPECTED_FILES":
+      // Get the tab ID from the sender
+      const tabId = sender.tab?.id;
+      if (!tabId) {
+        sendResponse({ expectedFiles: 0 });
+        return;
+      }
+      
+      // Execute in page context to read window.BIF
+      chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: () => {
+          try {
+            // @ts-ignore
+            const spine = window.BIF?.map?.spine;
+            return Array.isArray(spine) ? spine.length : 0;
+          } catch (e) {
+            return 0;
+          }
+        }
+      }).then(results => {
+        const count = results?.[0]?.result || 0;
+        sendResponse({ expectedFiles: count });
+      }).catch(err => {
+        console.error("[libby-fetch] Error getting expected files:", err);
+        sendResponse({ expectedFiles: 0 });
+      });
+      
+      return true; // Keep channel open for async response
+
     case "START_DOWNLOAD":
       // Clear any existing block rules from previous downloads
       clearBlockRules();
@@ -258,19 +299,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Clear block rules now that we're done
       clearBlockRules();
       
-      notifyPopup();
+      notifyProgress();
       sendResponse({ success: true });
       break;
 
     case "SCRUBBING_PROGRESS":
       state.currentPercent = message.percent;
-      // Forward progress to popup
-      chrome.runtime.sendMessage({
-        type: "PROGRESS_UPDATE",
-        fileCount: state.fileCount,
-        percent: message.percent,
-        isDownloading: state.isDownloading,
-      }).catch(() => {});
+      // Forward progress to popup and content script
+      notifyProgress();
       sendResponse({ success: true });
       break;
   }
@@ -278,14 +314,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep channel open for async response
 });
 
-// Update badge when on Overdrive pages
+// Update icon when on Overdrive pages
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url) {
     if (tab.url.includes(".listen.overdrive.com")) {
-      chrome.action.setBadgeText({ tabId, text: "●" });
-      chrome.action.setBadgeBackgroundColor({ tabId, color: "#4CAF50" });
+      chrome.action.setIcon({
+        tabId,
+        path: {
+          16: "/icons/icon16-active.png",
+          48: "/icons/icon48-active.png",
+          128: "/icons/icon128-active.png",
+        },
+      });
     } else {
-      chrome.action.setBadgeText({ tabId, text: "" });
+      chrome.action.setIcon({
+        tabId,
+        path: {
+          16: "/icons/icon16.png",
+          48: "/icons/icon48.png",
+          128: "/icons/icon128.png",
+        },
+      });
     }
   }
 });

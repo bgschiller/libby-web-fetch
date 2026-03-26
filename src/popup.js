@@ -40,7 +40,7 @@ async function getCurrentTab() {
  * @returns {boolean}
  */
 function isOverdrivePage(url) {
-  return !!url && url.includes(".listen.overdrive.com");
+  return !!url && (url.includes(".listen.overdrive.com") || url.includes("libbyapp.com"));
 }
 
 /**

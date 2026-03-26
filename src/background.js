@@ -317,7 +317,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Update icon when on Overdrive pages
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url) {
-    if (tab.url.includes(".listen.overdrive.com")) {
+    if (tab.url.includes(".listen.overdrive.com") || tab.url.includes("libbyapp.com")) {
       chrome.action.setIcon({
         tabId,
         path: {

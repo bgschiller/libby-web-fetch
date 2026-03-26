@@ -16,10 +16,18 @@ A Chrome extension to download audiobooks from Overdrive/Libby for offline liste
 
 The extension icon will appear in your toolbar. It shows a green dot when you're on a compatible Libby audiobook page.
 
+### Updating the Extension
+
+When you pull new changes, reload the extension in Chrome:
+
+1. Open `chrome://extensions/`
+2. Find **Libby Audiobook Downloader** and click the refresh icon (↺)
+3. Refresh any open Libby tabs to pick up content script changes
+
 ## Usage
 
 1. Open [Libby](https://libbyapp.com) and navigate to an audiobook you have checked out
-2. Open the audiobook player (URL will be like `*.listen.overdrive.com`)
+2. Open the audiobook player (URL will be like `*.listen.overdrive.com` or `libbyapp.com/open/loan/...`)
 3. Click the extension icon in your toolbar
 
 ![Start download popup](images/start-download.png)
@@ -127,7 +135,7 @@ pnpm run check
 ## Troubleshooting
 
 ### Downloads not starting
-- Make sure you're on an audiobook player page (`*.listen.overdrive.com`)
+- Make sure you're on an audiobook player page (`*.listen.overdrive.com` or `libbyapp.com/open/loan/...`)
 - Try refreshing the page and restarting the download
 
 ### Missing files

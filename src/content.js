@@ -362,8 +362,10 @@ async function startScrubbing() {
       });
     }
 
-    if (progress >= 0.99) {
-      console.log("[libby-fetch] Reached end of audiobook");
+    // Fallback completion check when spine data isn't available.
+    // Normally the background detects completion by counting downloaded spine entries.
+    if (progress >= 0.99 && totalExpectedFiles === 0) {
+      console.log("[libby-fetch] Reached end of audiobook (fallback, no spine data)");
       stopScrubbing();
       chrome.runtime.sendMessage({ type: "SCRUBBING_COMPLETE" });
       return;
@@ -417,6 +419,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case "DOWNLOAD_PROGRESS":
       updateProgressBanner(message.fileCount, message.percent || 0);
       if (!message.isDownloading && message.fileCount > 0) {
+        stopScrubbing();
         showCompleteBanner(message.fileCount);
       }
       sendResponse({ success: true });

@@ -3,7 +3,7 @@
 
 // Background service worker for Libby audiobook downloads
 
-/** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number}} */
+/** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number, spineData: Array<any>, spineByPartId: Object, spineParts: string[], spinePartIndex: number}} */
 const state = {
   isDownloading: false,
   bookTitle: "",
@@ -15,6 +15,8 @@ const state = {
   currentPercent: 0,
   expectedDuration: "",
   nextRuleId: 1,
+  spineData: [],
+  spineByPartId: {},
 };
 
 // URL patterns for audio files
@@ -46,11 +48,13 @@ function toKebabCase(str) {
  */
 function getBaseUrl(url) {
   try {
-    // Try to extract the badurl parameter which contains the actual file identifier
+    // Try to extract the badurl parameter which contains the actual file identifier.
+    // The badurl value is URL-safe base64 (uses _ and - instead of / and +).
     const badUrlMatch = url.match(/badurl=([^;/]+)/);
     if (badUrlMatch) {
-      // Decode the base64 badurl
-      const decoded = atob(badUrlMatch[1]);
+      // Convert URL-safe base64 to standard base64 for atob
+      const b64 = badUrlMatch[1].replace(/_/g, '/').replace(/-/g, '+');
+      const decoded = atob(b64);
       // Extract the Part number (e.g., Part01, Part02)
       const partMatch = decoded.match(/Part(\d+)\.mp3/i);
       if (partMatch) {
@@ -65,11 +69,25 @@ function getBaseUrl(url) {
   } catch (e) {
     console.log("[libby-fetch] Error decoding URL:", e.message);
   }
-  
+
   // Fallback: use the path from the URL
   const urlObj = new URL(url);
   const pathParts = urlObj.pathname.split('/');
   return pathParts[pathParts.length - 1] || url;
+}
+
+/**
+ * Extract the Part suffix from a spine entry's path.
+ * e.g. "%7BGUID%7DFmt425-Part01.mp3" -> "Part01.mp3"
+ * @param {Object} entry
+ * @returns {string}
+ */
+function extractPartSuffix(entry) {
+  const decoded = decodeURIComponent(entry.path);
+  const match = decoded.match(/Part(\d+)\.mp3$/i);
+  if (match) return match[1] + '.mp3';  // e.g., "08.mp3" instead of "Part08.mp3"
+  // Fallback: filename after last / or \
+  return decoded.replace(/.*[/\\]/, '') || decoded;
 }
 
 /**
@@ -78,10 +96,7 @@ function getBaseUrl(url) {
  */
 async function blockUrl(baseUrl) {
   const ruleId = state.nextRuleId++;
-  
-  // Escape special regex characters in the URL
-  const escapedUrl = baseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  
+
   try {
     await chrome.declarativeNetRequest.updateDynamicRules({
       addRules: [{
@@ -129,6 +144,104 @@ function isAudioUrl(url) {
   return AUDIO_URL_PATTERNS.some((pattern) => pattern.test(url));
 }
 
+/**
+ * Load spine data from page context and build the partId lookup map.
+ * @param {number} tabId
+ * @returns {Promise<void>}
+ */
+async function loadSpineData(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        try {
+          // @ts-ignore
+          return window.BIF?.map?.spine || [];
+        } catch (e) {
+          return [];
+        }
+      }
+    });
+    const spine = results?.[0]?.result || [];
+    state.spineData = spine;
+    state.spineByPartId = {};
+    for (const entry of spine) {
+      const decoded = decodeURIComponent(entry.path);
+      const partMatch = decoded.match(/Part(\d+)\.mp3/i);
+      if (partMatch) {
+        state.spineByPartId['Part' + partMatch[1]] = entry;
+      }
+    }
+    console.log("[libby-fetch] Loaded spine:", state.spineData.length, "entries");
+  } catch (err) {
+    console.error("[libby-fetch] Failed to load spine data:", err);
+    state.spineData = [];
+    state.spineByPartId = {};
+  }
+}
+
+/**
+ * Download the manifest JSON file listing all expected audio parts with their time spans.
+ */
+function downloadManifest() {
+  if (state.spineData.length === 0) {
+    console.log("[libby-fetch] No spine data available, skipping manifest download");
+    return;
+  }
+
+  let cumulativeTime = 0;
+  const files = state.spineData.map(entry => {
+    const suffix = extractPartSuffix(entry);
+    const duration = entry['audio-duration'] || 0;
+    const file = {
+      filename: `${state.kebabTitle}-${suffix}`,
+      startTime: cumulativeTime,
+      duration,
+      endTime: cumulativeTime + duration,
+      byteSize: entry['-odread-file-bytes'],
+      bitrate: entry['audio-bitrate'],
+      spinePosition: entry['-odread-spine-position'],
+      path: entry.path,
+    };
+    cumulativeTime += duration;
+    return file;
+  });
+
+  const manifest = {
+    bookTitle: state.bookTitle,
+    kebabTitle: state.kebabTitle,
+    generatedAt: new Date().toISOString(),
+    totalDuration: cumulativeTime,
+    files,
+  };
+
+  const json = JSON.stringify(manifest, null, 2);
+  const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(json);
+
+  chrome.downloads.download({
+    url: dataUrl,
+    filename: `${state.kebabTitle}/${state.kebabTitle}-manifest.json`,
+    conflictAction: 'overwrite',
+  }, (downloadId) => {
+    if (chrome.runtime.lastError) {
+      console.error("[libby-fetch] Manifest download error:", chrome.runtime.lastError);
+    } else {
+      console.log("[libby-fetch] Manifest downloaded:", downloadId);
+    }
+  });
+}
+
+/**
+ * Called when all spine entries have been collected. Stops the download and notifies UI.
+ * Content script stops scrubbing when it receives DOWNLOAD_PROGRESS with isDownloading=false.
+ */
+function completeDownload() {
+  state.isDownloading = false;
+  clearBlockRules();
+  notifyProgress();
+}
+
 // Listen for audio file requests
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
@@ -144,13 +257,17 @@ chrome.webRequest.onBeforeRequest.addListener(
 
     // Mark as pending immediately to prevent race conditions
     state.pendingUrls.add(baseUrl);
-    
+
     // Then mark as downloaded
     state.downloadedUrls.add(baseUrl);
     state.fileCount++;
 
-    const paddedNumber = String(state.fileCount).padStart(3, "0");
-    const filename = `${state.kebabTitle}-${paddedNumber}.mp3`;
+    // Determine filename: look up the spine entry by part ID (e.g., "Part08")
+    // getBaseUrl now correctly extracts the part ID from the URL-safe-base64 badurl parameter
+    const spineEntry = state.spineByPartId[baseUrl];
+    const fileSuffix = spineEntry ? extractPartSuffix(spineEntry) : `${baseUrl}.mp3`;
+    const filename = `${state.kebabTitle}-${fileSuffix}`;
+    console.log("[libby-fetch] Matched:", baseUrl, "→", fileSuffix);
     const downloadPath = `${state.kebabTitle}/${filename}`;
 
     console.log("[libby-fetch] Downloading:", downloadPath, "from", details.url);
@@ -176,6 +293,12 @@ chrome.webRequest.onBeforeRequest.addListener(
 
     // Notify popup and content script of progress
     notifyProgress();
+
+    // Check if all spine entries have been collected
+    if (state.spineData.length > 0 && state.downloadedUrls.size >= state.spineData.length) {
+      console.log("[libby-fetch] All", state.spineData.length, "spine entries collected, completing download");
+      completeDownload();
+    }
   },
   {
     urls: [
@@ -192,12 +315,12 @@ function notifyProgress() {
     percent: state.currentPercent,
     isDownloading: state.isDownloading,
   };
-  
+
   // Notify popup (if open)
   chrome.runtime.sendMessage(message).catch(() => {
     // Popup might not be open, that's fine
   });
-  
+
   // Notify content script (for on-page progress banner)
   if (state.tabId) {
     chrome.tabs.sendMessage(state.tabId, message).catch(() => {
@@ -218,7 +341,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ expectedFiles: 0 });
         return;
       }
-      
+
+      // If spine is already loaded, use it directly
+      if (state.spineData.length > 0) {
+        sendResponse({ expectedFiles: state.spineData.length });
+        return;
+      }
+
       // Execute in page context to read window.BIF
       chrome.scripting.executeScript({
         target: { tabId },
@@ -239,13 +368,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error("[libby-fetch] Error getting expected files:", err);
         sendResponse({ expectedFiles: 0 });
       });
-      
+
       return true; // Keep channel open for async response
 
     case "START_DOWNLOAD":
       // Clear any existing block rules from previous downloads
       clearBlockRules();
-      
+
       state.isDownloading = true;
       state.bookTitle = message.bookTitle;
       state.kebabTitle = toKebabCase(message.bookTitle);
@@ -255,29 +384,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.tabId = message.tabId;
       state.currentPercent = 0;
       state.expectedDuration = message.expectedDuration || "";
-      
+      state.spineData = [];
+      state.spineByPartId = {};
+
       console.log("[libby-fetch] Starting download for:", state.bookTitle);
-      
-      // Tell content script to start scrubbing
-      if (state.tabId) {
-        chrome.tabs.sendMessage(state.tabId, { type: "START_SCRUBBING" });
-      }
-      
+
       sendResponse({ success: true, kebabTitle: state.kebabTitle });
-      break;
+
+      // Load spine, download manifest, then start scrubbing
+      loadSpineData(message.tabId).then(() => {
+        downloadManifest();
+        if (state.tabId) {
+          chrome.tabs.sendMessage(state.tabId, { type: "START_SCRUBBING" });
+        }
+      });
+
+      return true; // Keep channel open for async response
 
     case "STOP_DOWNLOAD":
       state.isDownloading = false;
       console.log("[libby-fetch] Stopping download");
-      
+
       // Clear block rules
       clearBlockRules();
-      
+
       // Tell content script to stop
       if (state.tabId) {
         chrome.tabs.sendMessage(state.tabId, { type: "STOP_SCRUBBING" });
       }
-      
+
       sendResponse({ success: true });
       break;
 
@@ -294,11 +429,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case "SCRUBBING_COMPLETE":
       state.isDownloading = false;
-      console.log("[libby-fetch] Scrubbing complete, total files:", state.fileCount);
-      
+      console.log("[libby-fetch] Scrubbing complete (fallback), total files:", state.fileCount);
+
       // Clear block rules now that we're done
       clearBlockRules();
-      
+
       notifyProgress();
       sendResponse({ success: true });
       break;

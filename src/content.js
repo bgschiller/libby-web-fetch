@@ -132,6 +132,73 @@ function getSeekometer() {
   return document.querySelector(".seekometer");
 }
 
+/**
+ * Seek to a percentage position in the audiobook by simulating a click
+ * on the progress bar. Tries multiple selectors to handle Libby's changing markup.
+ * @param {number} percent - Value between 0 and 1
+ * @returns {Promise<boolean>} true if seek was attempted
+ */
+async function seekToPercent(percent) {
+  const target = Math.max(0, Math.min(1, percent));
+
+  // Try multiple selectors for the seek bar / timeline track,
+  // because Libby's player markup has changed over time.
+  const selectors = [
+    ".seekometer",
+    ".timeline-track",
+    "[class*='timeline'] [class*='track']",
+    "[class*='progress'] [class*='bar']",
+    "input[type='range']",
+  ];
+
+  /** @type {HTMLElement|null} */
+  let seekBar = null;
+  for (const sel of selectors) {
+    seekBar = document.querySelector(sel);
+    if (seekBar) break;
+  }
+
+  if (!seekBar) {
+    console.log("[libby-fetch] seekToPercent: no seek bar found");
+    return false;
+  }
+
+  const rect = seekBar.getBoundingClientRect();
+  const x = rect.left + rect.width * target;
+  const y = rect.top + rect.height / 2;
+
+  console.log("[libby-fetch] seekToPercent:", Math.round(target * 100) + "%", "at x=" + Math.round(x) + " y=" + Math.round(y));
+
+  const eventOpts = {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    clientX: x,
+    clientY: y,
+    screenX: x,
+    screenY: y,
+    button: 0,
+  };
+
+  // Dispatch full mouse event sequence so the player recognizes the seek
+  seekBar.dispatchEvent(new MouseEvent("mousedown", eventOpts));
+  seekBar.dispatchEvent(new MouseEvent("mouseup", eventOpts));
+  seekBar.dispatchEvent(new MouseEvent("click", eventOpts));
+
+  // For <input type="range"> elements, dispatch an input event too
+  if (seekBar.tagName === "INPUT" && seekBar.getAttribute("type") === "range") {
+    // Set the value directly as well
+    const inputEl = /** @type {HTMLInputElement} */ (seekBar);
+    const range = inputEl.max ? parseFloat(inputEl.max) - (parseFloat(inputEl.min) || 0) : 1;
+    inputEl.value = String(parseFloat(inputEl.min || "0") + range * target);
+    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    inputEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  await sleep(300);
+  return true;
+}
+
 /** @returns {HTMLElement|null} */
 function getPlayButton() {
   return document.querySelector('footer button[aria-label="Play"]') ||

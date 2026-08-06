@@ -3,7 +3,7 @@
 
 // Background service worker for Libby audiobook downloads
 
-/** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number, spineData: Array<any>, spineByPartId: Object, spineParts: string[], spinePartIndex: number}} */
+/** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number, spineData: Array<any>, spineByPartId: Object, spineWithTimes: Array<any>, missingFiles: Array<any>, isFillingGaps: boolean}} */
 const state = {
   isDownloading: false,
   bookTitle: "",
@@ -17,6 +17,9 @@ const state = {
   nextRuleId: 1,
   spineData: [],
   spineByPartId: {},
+  spineWithTimes: [],  // spine entries with cumulative start times, for gap detection
+  missingFiles: [],     // files declared in manifest but not downloaded
+  isFillingGaps: false,
 };
 
 // URL patterns for audio files
@@ -191,6 +194,7 @@ function downloadManifest() {
   }
 
   let cumulativeTime = 0;
+  const filesWithTimes = [];
   const files = state.spineData.map(entry => {
     const suffix = extractPartSuffix(entry);
     const duration = entry['audio-duration'] || 0;
@@ -205,8 +209,12 @@ function downloadManifest() {
       path: entry.path,
     };
     cumulativeTime += duration;
+    filesWithTimes.push({ ...file, cumulativeStartTime: cumulativeTime - duration });
     return file;
   });
+
+  // Store spine entries with cumulative start times for gap detection later
+  state.spineWithTimes = filesWithTimes;
 
   const manifest = {
     bookTitle: state.bookTitle,
@@ -233,19 +241,83 @@ function downloadManifest() {
 }
 
 /**
+ * Compare downloaded URLs against the manifest spine to detect missing files.
+ * Reports gaps to the popup and content script.
+ */
+function verifyAndReport() {
+  if (state.spineWithTimes.length === 0) {
+    console.log("[libby-fetch] No spine timing data available, skipping verification");
+    return;
+  }
+
+  const missing = [];
+  for (const entry of state.spineWithTimes) {
+    // Determine the part ID that getBaseUrl() would produce for this file.
+    // The entry's filename is like "operation-bounce-house-01.mp3", the part suffix is "01.mp3"
+    // and getBaseUrl returns "Part01".
+    const suffixMatch = entry.filename.match(/-(\d+)\.mp3$/);
+    const partId = suffixMatch ? 'Part' + suffixMatch[1] : null;
+
+    if (!partId) {
+      console.log("[libby-fetch] Could not extract part ID from:", entry.filename);
+      continue;
+    }
+
+    if (!state.downloadedUrls.has(partId)) {
+      missing.push({
+        filename: entry.filename,
+        partId,
+        startTime: entry.cumulativeStartTime,
+        duration: entry.duration,
+        path: entry.path,
+      });
+    }
+  }
+
+  state.missingFiles = missing;
+
+  if (missing.length > 0) {
+    console.warn(
+      "[libby-fetch] MISSING FILES:",
+      missing.map(f => f.filename).join(", "),
+      `(${missing.length} of ${state.spineWithTimes.length} expected)`
+    );
+  } else {
+    console.log("[libby-fetch] All", state.spineWithTimes.length, "expected files accounted for");
+  }
+
+  // Notify popup and content script of completion with gap info
+  const msg = {
+    type: "DOWNLOAD_COMPLETE",
+    fileCount: state.fileCount,
+    expectedCount: state.spineWithTimes.length,
+    missingFiles: missing,
+    totalDuration: state.spineWithTimes.length > 0
+      ? state.spineWithTimes[state.spineWithTimes.length - 1].endTime
+      : 0,
+  };
+
+  chrome.runtime.sendMessage(msg).catch(() => {});
+  if (state.tabId) {
+    chrome.tabs.sendMessage(state.tabId, msg).catch(() => {});
+  }
+}
+
+/**
  * Called when all spine entries have been collected. Stops the download and notifies UI.
  * Content script stops scrubbing when it receives DOWNLOAD_PROGRESS with isDownloading=false.
  */
 function completeDownload() {
   state.isDownloading = false;
   clearBlockRules();
+  verifyAndReport();
   notifyProgress();
 }
 
 // Listen for audio file requests
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (!state.isDownloading) return;
+    if (!state.isDownloading && !state.isFillingGaps) return;
 
     const baseUrl = getBaseUrl(details.url);
 
@@ -424,6 +496,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         bookTitle: state.bookTitle,
         kebabTitle: state.kebabTitle,
         expectedDuration: state.expectedDuration,
+        expectedCount: state.spineWithTimes.length,
+        missingFiles: state.missingFiles,
+        isFillingGaps: state.isFillingGaps,
       });
       break;
 
@@ -434,7 +509,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Clear block rules now that we're done
       clearBlockRules();
 
+      verifyAndReport();
       notifyProgress();
+      sendResponse({ success: true });
+      break;
+
+    case "FILL_GAPS":
+      if (state.missingFiles.length === 0) {
+        console.log("[libby-fetch] No gaps to fill");
+        sendResponse({ success: true, filled: 0 });
+        break;
+      }
+
+      console.log("[libby-fetch] Filling", state.missingFiles.length, "gaps:", state.missingFiles.map(f => f.partId));
+      state.isFillingGaps = true;
+
+      // Tell content script to seek to each missing part
+      if (state.tabId) {
+        const totalDuration = state.spineWithTimes[state.spineWithTimes.length - 1]?.endTime || 0;
+        chrome.tabs.sendMessage(state.tabId, {
+          type: "FILL_GAPS",
+          missingParts: state.missingFiles,
+          totalDuration,
+        }).catch(err => {
+          console.error("[libby-fetch] Failed to send FILL_GAPS to content script:", err);
+          sendResponse({ success: false, error: err.message });
+        });
+      }
+
+      sendResponse({ success: true });
+      break;
+
+    case "GAP_FILL_COMPLETE":
+      state.isFillingGaps = false;
+      console.log("[libby-fetch] Gap fill complete, re-verifying");
+      verifyAndReport();
       sendResponse({ success: true });
       break;
 

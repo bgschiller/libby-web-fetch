@@ -81,11 +81,20 @@ async function init() {
   // Check current download status
   const status = await chrome.runtime.sendMessage({ type: "GET_STATUS" });
 
-  if (status.isDownloading) {
+  if (status.isDownloading || status.isFillingGaps) {
     showSection("progress-section");
     updateProgress(status.fileCount, status.percent || 0);
     currentKebabTitle = status.kebabTitle;
     expectedDuration = status.expectedDuration;
+    return;
+  }
+
+  // If a download completed but the popup was closed, restore the completion view.
+  // This also handles the case where gaps were found/filled while the popup was closed.
+  if (status.fileCount > 0 && !status.isDownloading) {
+    currentKebabTitle = status.kebabTitle;
+    expectedDuration = status.expectedDuration;
+    showComplete(status.fileCount, status.expectedCount, status.missingFiles);
     return;
   }
 
@@ -147,18 +156,45 @@ function updateProgress(fileCount, percent) {
   }
 }
 
+/** @type {Array<{filename: string, partId: string}>} */
+let currentMissingFiles = [];
+
 /**
  * @param {number} totalFiles
+ * @param {number} [expectedCount]
+ * @param {Array<{filename: string, partId: string}>} [missingFiles]
  */
-function showComplete(totalFiles) {
+function showComplete(totalFiles, expectedCount, missingFiles) {
   showSection("complete-section");
+
+  currentMissingFiles = missingFiles || [];
   
   const totalFilesEl = $("total-files");
   if (totalFilesEl) {
-    totalFilesEl.textContent = String(totalFiles);
+    if (expectedCount && missingFiles && missingFiles.length > 0) {
+      totalFilesEl.textContent = `${totalFiles} / ${expectedCount}`;
+    } else {
+      totalFilesEl.textContent = String(totalFiles);
+    }
   }
 
-  // Update validation command
+  // Show/hide gap-fill UI
+  const gapSection = $("gap-section");
+  const missingFilesList = $("missing-files-list");
+  const fillGapsBtn = $("fill-gaps-btn");
+
+  if (gapSection && missingFiles && missingFiles.length > 0) {
+    gapSection.classList.remove("hidden");
+    if (missingFilesList) {
+      missingFilesList.textContent = missingFiles.map(f => f.filename).join("\n");
+    }
+    if (fillGapsBtn) {
+      fillGapsBtn.disabled = false;
+      fillGapsBtn.textContent = `Fill ${missingFiles.length} Gap${missingFiles.length > 1 ? 's' : ''}`;
+    }
+  } else if (gapSection) {
+    gapSection.classList.add("hidden");
+  }
   const commandEl = $("validation-command");
   const expectedEl = $("expected-duration");
   
@@ -230,10 +266,19 @@ chrome.runtime.onMessage.addListener((message) => {
 
   if (message.type === "DOWNLOAD_PROGRESS" || message.type === "PROGRESS_UPDATE") {
     if (!message.isDownloading && message.fileCount > 0) {
-      showComplete(message.fileCount);
-    } else {
+      // DOWNLOAD_PROGRESS with isDownloading=false is the older signal.
+      // DOWNLOAD_COMPLETE is the newer, richer one. Both may fire, so
+      // DOWNLOAD_COMPLETE takes precedence for the final state.
+      if (!message.missingFiles) {
+        showComplete(message.fileCount);
+      }
+    } else if (message.isDownloading || message.fileCount >= 0) {
       updateProgress(message.fileCount, message.percent || 0);
     }
+  }
+
+  if (message.type === "DOWNLOAD_COMPLETE") {
+    showComplete(message.fileCount, message.expectedCount, message.missingFiles);
   }
 });
 
@@ -244,7 +289,30 @@ document.addEventListener("DOMContentLoaded", () => {
   $("start-btn")?.addEventListener("click", startDownload);
   $("stop-btn")?.addEventListener("click", stopDownload);
   $("new-download-btn")?.addEventListener("click", () => {
+    currentMissingFiles = [];
     showSection("setup-section");
+  });
+
+  // Fill gaps button
+  $("fill-gaps-btn")?.addEventListener("click", async () => {
+    const btn = /** @type {HTMLButtonElement} */ ($("fill-gaps-btn"));
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Filling gaps...";
+    }
+
+    try {
+      await chrome.runtime.sendMessage({ type: "FILL_GAPS" });
+    } catch (error) {
+      console.error("Fill gaps error:", error);
+      showError("Failed to fill gaps. Make sure the Libby page is still open.");
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = currentMissingFiles.length > 0
+          ? `Fill ${currentMissingFiles.length} Gap${currentMissingFiles.length > 1 ? 's' : ''}`
+          : "Fill Gaps";
+      }
+    }
   });
 
   // Update kebab title when folder name changes

@@ -4,6 +4,7 @@
 // Content script for Libby audiobook pages
 
 let isScrubbing = false;
+let isFillingGaps = false;
 /** @type {HTMLElement|null} */
 let progressBanner = null;
 /** @type {number} */
@@ -491,6 +492,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       sendResponse({ success: true });
       break;
+
+    case "DOWNLOAD_COMPLETE":
+      stopScrubbing();
+      if (message.missingFiles && message.missingFiles.length > 0) {
+        showCompleteBanner(message.fileCount, message.missingFiles);
+      } else {
+        showCompleteBanner(message.fileCount);
+      }
+      sendResponse({ success: true });
+      break;
+
+    case "FILL_GAPS":
+      fillGaps(message.missingParts, message.totalDuration);
+      sendResponse({ success: true });
+      break;
   }
 
   return true;
@@ -619,8 +635,9 @@ function updateProgressBanner(fileCount, percent) {
 /**
  * Show completion state in the banner
  * @param {number} fileCount
+ * @param {Array<{filename: string}>} [missingFiles]
  */
-function showCompleteBanner(fileCount) {
+function showCompleteBanner(fileCount, missingFiles) {
   if (!progressBanner) return;
   
   progressBanner.classList.add('lfp-complete');
@@ -633,7 +650,11 @@ function showCompleteBanner(fileCount) {
     const expectedNote = totalExpectedFiles > 0 && fileCount !== totalExpectedFiles
       ? ` (expected ${totalExpectedFiles})`
       : '';
-    statusEl.textContent = `Download complete! ${fileCount} files${expectedNote}`;
+    if (missingFiles && missingFiles.length > 0) {
+      statusEl.textContent = `Download complete — ${missingFiles.length} file(s) missing ${expectedNote}`;
+    } else {
+      statusEl.textContent = `Download complete! ${fileCount} files${expectedNote}`;
+    }
   }
   
   const detailsEl = progressBanner.querySelector('.lfp-details');
@@ -654,6 +675,64 @@ function removeProgressBanner() {
     progressBanner.remove();
     progressBanner = null;
   }
+}
+
+/**
+ * Fill gaps by seeking to each missing part's time range and waiting for the
+ * audio request to be intercepted by the background worker.
+ * @param {Array<{partId: string, startTime: number, duration: number}>} missingParts
+ * @param {number} totalDuration
+ */
+async function fillGaps(missingParts, totalDuration) {
+  if (isFillingGaps) {
+    console.log("[libby-fetch] Already filling gaps, ignoring");
+    return;
+  }
+
+  isFillingGaps = true;
+  console.log("[libby-fetch] Starting gap fill for", missingParts.length, "missing parts");
+
+  // Ensure playback is active
+  const playBtn = getPlayButton();
+  if (playBtn) {
+    playBtn.click();
+    await sleep(500);
+  }
+
+  for (const part of missingParts) {
+    if (!isFillingGaps) {
+      console.log("[libby-fetch] Gap fill cancelled");
+      break;
+    }
+
+    // Seek to slightly past the start of the missing part to trigger its audio request.
+    // Seeking to the exact start might still hit a cached boundary, so add a 2s offset.
+    const seekSeconds = part.startTime + Math.min(2, part.duration * 0.15);
+    const percent = totalDuration > 0 ? seekSeconds / totalDuration : 0;
+
+    console.log(
+      "[libby-fetch] Filling gap:", part.partId,
+      "→ seeking to", Math.round(seekSeconds) + "s",
+      "(" + Math.round(percent * 100) + "%)"
+    );
+
+    await seekToPercent(percent);
+
+    // Wait for the player to buffer and request the audio from the CDN.
+    // The background worker's webRequest listener will capture and download it.
+    await sleep(3000);
+  }
+
+  isFillingGaps = false;
+  console.log("[libby-fetch] Gap fill loop complete, notifying background");
+
+  // Re-pause playback
+  const pauseBtn = getPauseButton();
+  if (pauseBtn) {
+    pauseBtn.click();
+  }
+
+  chrome.runtime.sendMessage({ type: "GAP_FILL_COMPLETE" });
 }
 
 console.log("[libby-fetch] Content script loaded on", window.location.href);

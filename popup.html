@@ -231,6 +231,13 @@
       </div>
     </div>
 
+    <div id="gap-section" class="hidden" style="background: #fff3e0; padding: 12px; border-radius: 8px; margin-top: 12px; border: 1px solid #ffe0b2;">
+      <h3 style="font-size: 13px; margin: 0 0 8px 0; color: #e65100;">⚠️ Missing Files</h3>
+      <pre id="missing-files-list" style="background: #fff; border: 1px solid #ffe0b2; padding: 8px; border-radius: 4px; font-size: 11px; margin: 0 0 8px 0; white-space: pre-wrap; word-break: break-all;"></pre>
+      <p style="font-size: 11px; color: #666; margin: 0 0 8px 0;">These files were declared in the manifest but not downloaded. This usually happens when the first track was already cached by the browser.</p>
+      <button id="fill-gaps-btn" class="primary" style="background: #e65100; margin-top: 4px;">Fill Gaps</button>
+    </div>
+
     <details id="validation-details">
       <summary>Validate your download</summary>
       <div class="validation-box">

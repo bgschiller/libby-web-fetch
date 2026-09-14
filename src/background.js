@@ -155,7 +155,7 @@ function isAudioUrl(url) {
 async function loadSpineData(tabId) {
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       world: "MAIN",
       func: () => {
         try {
@@ -166,7 +166,15 @@ async function loadSpineData(tabId) {
         }
       }
     });
-    const spine = results?.[0]?.result || [];
+    // The player (and window.BIF) lives in an iframe on *.listen.libbyapp.com,
+    // so scan all frames for the one that actually returned spine data.
+    let spine = [];
+    for (const result of results || []) {
+      if (Array.isArray(result?.result) && result.result.length > 0) {
+        spine = result.result;
+        break;
+      }
+    }
     state.spineData = spine;
     state.spineByPartId = {};
     for (const entry of spine) {
@@ -422,7 +430,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       // Execute in page context to read window.BIF
       chrome.scripting.executeScript({
-        target: { tabId },
+        target: { tabId, allFrames: true },
         world: "MAIN",
         func: () => {
           try {
@@ -434,7 +442,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         }
       }).then(results => {
-        const count = results?.[0]?.result || 0;
+        let count = 0;
+        for (const result of results || []) {
+          if (result?.result > 0) {
+            count = result.result;
+            break;
+          }
+        }
         sendResponse({ expectedFiles: count });
       }).catch(err => {
         console.error("[libby-fetch] Error getting expected files:", err);

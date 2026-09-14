@@ -14,6 +14,7 @@
   "host_permissions": [
     "*://*.listen.overdrive.com/*",
     "*://libbyapp.com/*",
+    "*://*.listen.libbyapp.com/*",
     "*://odrmediaclips.cachefly.net/*",
     "*://audioclips.cdn.overdrive.com/*"
   ],
@@ -35,8 +36,9 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://*.listen.overdrive.com/*", "*://libbyapp.com/*"],
-      "js": ["src/content.js"]
+      "matches": ["*://*.listen.overdrive.com/*", "*://*.listen.libbyapp.com/*"],
+      "js": ["src/content.js"],
+      "all_frames": true
     }
   ]
 }

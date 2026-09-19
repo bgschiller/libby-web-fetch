@@ -3,7 +3,7 @@
 
 // Background service worker for Libby audiobook downloads
 
-/** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number, spineData: Array<any>, spineByPartId: Object, spineWithTimes: Array<any>, missingFiles: Array<any>, isFillingGaps: boolean}} */
+/** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number, spineData: Array<any>, spineByPartId: Object, spineWithTimes: Array<any>, missingFiles: Array<any>, isFillingGaps: boolean, capturedRequests: Array<{tabId: number, url: string, baseUrl: string}>}} */
 const state = {
   isDownloading: false,
   bookTitle: "",
@@ -20,7 +20,30 @@ const state = {
   spineWithTimes: [],  // spine entries with cumulative start times, for gap detection
   missingFiles: [],     // files declared in manifest but not downloaded
   isFillingGaps: false,
+  capturedRequests: [],
 };
+
+const CAPTURED_REQUESTS_KEY = "capturedRequests";
+
+// Restore captured requests that were persisted before the service worker last shut down.
+if (chrome.storage.session) {
+  chrome.storage.session.get(CAPTURED_REQUESTS_KEY).then((result) => {
+    const stored = result?.[CAPTURED_REQUESTS_KEY];
+    if (Array.isArray(stored)) {
+      for (const r of stored) {
+        if (r && typeof r.tabId === "number" && typeof r.url === "string" && typeof r.baseUrl === "string") {
+          const exists = state.capturedRequests.some(
+            (c) => c.tabId === r.tabId && c.baseUrl === r.baseUrl
+          );
+          if (!exists) state.capturedRequests.push(r);
+        }
+      }
+      console.log("[libby-fetch] Restored", state.capturedRequests.length, "captured request(s)");
+    }
+  }).catch((err) => {
+    console.error("[libby-fetch] Failed to restore captured requests:", err);
+  });
+}
 
 // URL patterns for audio files
 const AUDIO_URL_PATTERNS = [
@@ -145,6 +168,44 @@ async function clearBlockRules() {
  */
 function isAudioUrl(url) {
   return AUDIO_URL_PATTERNS.some((pattern) => pattern.test(url));
+}
+
+/**
+ * Persist captured requests so they survive service worker restarts.
+ */
+function persistCapturedRequests() {
+  if (!chrome.storage.session) return;
+  chrome.storage.session.set({ [CAPTURED_REQUESTS_KEY]: state.capturedRequests }).catch((err) => {
+    console.error("[libby-fetch] Failed to persist captured requests:", err);
+  });
+}
+
+/**
+ * Record an audio request that fired before the user clicked "Start Download".
+ * These are processed (downloaded) once the user starts a download for this tab.
+ * @param {number} tabId
+ * @param {string} url
+ * @param {string} baseUrl
+ */
+function captureRequest(tabId, url, baseUrl) {
+  const alreadyCaptured = state.capturedRequests.some(
+    (r) => r.tabId === tabId && r.baseUrl === baseUrl
+  );
+  if (alreadyCaptured) return;
+  state.capturedRequests.push({ tabId, url, baseUrl });
+  persistCapturedRequests();
+}
+
+/**
+ * Remove captured requests for a tab (e.g. when it navigates or closes).
+ * @param {number} tabId
+ */
+function clearCapturedRequestsForTab(tabId) {
+  const before = state.capturedRequests.length;
+  state.capturedRequests = state.capturedRequests.filter((r) => r.tabId !== tabId);
+  if (state.capturedRequests.length !== before) {
+    persistCapturedRequests();
+  }
 }
 
 /**
@@ -322,63 +383,98 @@ function completeDownload() {
   notifyProgress();
 }
 
+/**
+ * Download a single audio URL and record its dedupe/blocking state.
+ * @param {string} url
+ * @param {string} baseUrl
+ */
+function handleAudioRequest(url, baseUrl) {
+  if (!state.isDownloading && !state.isFillingGaps) return;
+
+  // Check if we've already downloaded or are currently processing this URL
+  if (state.downloadedUrls.has(baseUrl) || state.pendingUrls.has(baseUrl)) {
+    console.log("[libby-fetch] Skipping duplicate URL:", baseUrl);
+    return;
+  }
+
+  // Mark as pending immediately to prevent race conditions
+  state.pendingUrls.add(baseUrl);
+
+  // Then mark as downloaded
+  state.downloadedUrls.add(baseUrl);
+  state.fileCount++;
+
+  // Determine filename: look up the spine entry by part ID (e.g., "Part08")
+  // getBaseUrl now correctly extracts the part ID from the URL-safe-base64 badurl parameter
+  const spineEntry = state.spineByPartId[baseUrl];
+  const fileSuffix = spineEntry ? extractPartSuffix(spineEntry) : `${baseUrl}.mp3`;
+  const filename = `${state.kebabTitle}-${fileSuffix}`;
+  console.log("[libby-fetch] Matched:", baseUrl, "→", fileSuffix);
+  const downloadPath = `${state.kebabTitle}/${filename}`;
+
+  console.log("[libby-fetch] Downloading:", downloadPath, "from", url);
+
+  // Block future requests for this URL to reduce server load
+  blockUrl(baseUrl);
+
+  // Download the full file (the URL is signed, so we can fetch it directly)
+  chrome.downloads.download(
+    {
+      url,
+      filename: downloadPath,
+      conflictAction: "uniquify",
+    },
+    (downloadId) => {
+      if (chrome.runtime.lastError) {
+        console.error("[libby-fetch] Download error:", chrome.runtime.lastError);
+      } else {
+        console.log("[libby-fetch] Started download:", downloadId, filename);
+      }
+    }
+  );
+
+  // Notify popup and content script of progress
+  notifyProgress();
+
+  // Check if all spine entries have been collected
+  if (state.spineData.length > 0 && state.downloadedUrls.size >= state.spineData.length) {
+    console.log("[libby-fetch] All", state.spineData.length, "spine entries collected, completing download");
+    completeDownload();
+  }
+}
+
+/**
+ * Process audio requests captured before the user clicked "Start Download".
+ * @param {number} tabId
+ */
+function processCapturedRequests(tabId) {
+  const relevant = state.capturedRequests.filter((r) => r.tabId === tabId);
+  if (relevant.length === 0) return;
+
+  state.capturedRequests = state.capturedRequests.filter((r) => r.tabId !== tabId);
+  persistCapturedRequests();
+
+  console.log("[libby-fetch] Processing", relevant.length, "captured request(s) for tab", tabId);
+  for (const r of relevant) {
+    handleAudioRequest(r.url, r.baseUrl);
+  }
+}
+
 // Listen for audio file requests
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (!state.isDownloading && !state.isFillingGaps) return;
-
     const baseUrl = getBaseUrl(details.url);
+    const shouldDownload = state.isDownloading || state.isFillingGaps;
 
-    // Check if we've already downloaded or are currently processing this URL
-    if (state.downloadedUrls.has(baseUrl) || state.pendingUrls.has(baseUrl)) {
-      console.log("[libby-fetch] Skipping duplicate URL:", baseUrl);
-      return;
+    // Capture requests immediately so we don't miss the first part of the book,
+    // which Libby requests when the player loads (before the user clicks Start).
+    if (details.tabId >= 0 && !shouldDownload) {
+      captureRequest(details.tabId, details.url, baseUrl);
     }
 
-    // Mark as pending immediately to prevent race conditions
-    state.pendingUrls.add(baseUrl);
+    if (!shouldDownload) return;
 
-    // Then mark as downloaded
-    state.downloadedUrls.add(baseUrl);
-    state.fileCount++;
-
-    // Determine filename: look up the spine entry by part ID (e.g., "Part08")
-    // getBaseUrl now correctly extracts the part ID from the URL-safe-base64 badurl parameter
-    const spineEntry = state.spineByPartId[baseUrl];
-    const fileSuffix = spineEntry ? extractPartSuffix(spineEntry) : `${baseUrl}.mp3`;
-    const filename = `${state.kebabTitle}-${fileSuffix}`;
-    console.log("[libby-fetch] Matched:", baseUrl, "→", fileSuffix);
-    const downloadPath = `${state.kebabTitle}/${filename}`;
-
-    console.log("[libby-fetch] Downloading:", downloadPath, "from", details.url);
-
-    // Block future requests for this URL to reduce server load
-    blockUrl(baseUrl);
-
-    // Download the full file (the URL is signed, so we can fetch it directly)
-    chrome.downloads.download(
-      {
-        url: details.url,
-        filename: downloadPath,
-        conflictAction: "uniquify",
-      },
-      (downloadId) => {
-        if (chrome.runtime.lastError) {
-          console.error("[libby-fetch] Download error:", chrome.runtime.lastError);
-        } else {
-          console.log("[libby-fetch] Started download:", downloadId, filename);
-        }
-      }
-    );
-
-    // Notify popup and content script of progress
-    notifyProgress();
-
-    // Check if all spine entries have been collected
-    if (state.spineData.length > 0 && state.downloadedUrls.size >= state.spineData.length) {
-      console.log("[libby-fetch] All", state.spineData.length, "spine entries collected, completing download");
-      completeDownload();
-    }
+    handleAudioRequest(details.url, baseUrl);
   },
   {
     urls: [
@@ -477,9 +573,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       sendResponse({ success: true, kebabTitle: state.kebabTitle });
 
-      // Load spine, download manifest, then start scrubbing
+      // Load spine, download manifest, process any pre-start requests, then start scrubbing
       loadSpineData(message.tabId).then(() => {
         downloadManifest();
+        processCapturedRequests(message.tabId);
         if (state.tabId) {
           chrome.tabs.sendMessage(state.tabId, { type: "START_SCRUBBING" });
         }
@@ -574,6 +671,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Update icon when on Overdrive pages
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // Clear captured requests when a tab navigates to a new page so stale
+  // captures from a previous book aren't applied to the next one.
+  if (changeInfo.status === "loading") {
+    clearCapturedRequestsForTab(tabId);
+  }
+
   if (changeInfo.status === "complete" && tab.url) {
     if (tab.url.includes(".listen.overdrive.com") || tab.url.includes("libbyapp.com")) {
       chrome.action.setIcon({
@@ -595,6 +698,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       });
     }
   }
+});
+
+// Clear captured requests when a tab is closed so stale captures can't leak
+// into a future tab that happens to reuse the same tab ID.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  clearCapturedRequestsForTab(tabId);
 });
 
 console.log("[libby-fetch] Background service worker initialized");

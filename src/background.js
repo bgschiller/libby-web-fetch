@@ -310,6 +310,24 @@ function downloadManifest() {
 }
 
 /**
+ * Build the track list sent to the content script for manifest-driven scrubbing.
+ * @returns {Array<{partId: string, startTime: number, endTime: number}>}
+ */
+function buildTrackList() {
+  return state.spineWithTimes
+    .map((entry) => {
+      const suffixMatch = entry.filename.match(/-(\d+)\.mp3$/);
+      if (!suffixMatch) return null;
+      return {
+        partId: 'Part' + suffixMatch[1],
+        startTime: entry.startTime,
+        endTime: entry.endTime,
+      };
+    })
+    .filter((t) => t !== null);
+}
+
+/**
  * Compare downloaded URLs against the manifest spine to detect missing files.
  * Reports gaps to the popup and content script.
  */
@@ -403,6 +421,11 @@ function handleAudioRequest(url, baseUrl) {
   // Then mark as downloaded
   state.downloadedUrls.add(baseUrl);
   state.fileCount++;
+
+  // Ack the content script so its manifest-driven scrub loop can advance.
+  if (state.tabId) {
+    chrome.tabs.sendMessage(state.tabId, { type: "TRACK_DOWNLOADED", partId: baseUrl }).catch(() => {});
+  }
 
   // Determine filename: look up the spine entry by part ID (e.g., "Part08")
   // getBaseUrl now correctly extracts the part ID from the URL-safe-base64 badurl parameter
@@ -578,7 +601,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         downloadManifest();
         processCapturedRequests(message.tabId);
         if (state.tabId) {
-          chrome.tabs.sendMessage(state.tabId, { type: "START_SCRUBBING" });
+          chrome.tabs.sendMessage(state.tabId, {
+            type: "START_SCRUBBING",
+            tracks: buildTrackList(),
+            totalDuration: state.spineWithTimes.length > 0
+              ? state.spineWithTimes[state.spineWithTimes.length - 1].endTime
+              : 0,
+            downloadedParts: Array.from(state.downloadedUrls),
+          });
         }
       });
 
@@ -614,8 +644,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case "SCRUBBING_COMPLETE":
+      // If background already completed via the file-count check, it already
+      // verified and reported — nothing left to do.
+      if (!state.isDownloading) {
+        sendResponse({ success: true });
+        break;
+      }
       state.isDownloading = false;
-      console.log("[libby-fetch] Scrubbing complete (fallback), total files:", state.fileCount);
+      console.log("[libby-fetch] Scrubbing complete (content finished visiting tracks), total files:", state.fileCount);
 
       // Clear block rules now that we're done
       clearBlockRules();

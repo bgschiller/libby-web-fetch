@@ -9,10 +9,20 @@ let isFillingGaps = false;
 let progressBanner = null;
 /** @type {number} */
 let totalExpectedFiles = 0;
-/** @type {number|null} */
-let scrubInterval = null;
 /** @type {number} */
 let totalDurationSeconds = 0;
+/** @type {Array<{partId: string, startTime: number, endTime: number}>} */
+let trackList = [];
+/** @type {number} */
+let trackListTotalDuration = 0;
+/** @type {Set<string>} */
+let downloadedParts = new Set();
+/** @type {Set<string>} */
+let gaveUpParts = new Set();
+/** @type {Map<string, Array<(acked: boolean) => void>>} */
+let ackWaiters = new Map();
+/** @type {number} */
+let lastLoggedPercent = -1;
 
 /** @returns {string} */
 function getBookTitle() {
@@ -389,13 +399,99 @@ async function restartAudiobook() {
   }
 }
 
-async function startScrubbing() {
+/**
+ * Wait until the given part is acknowledged (downloaded) by the background.
+ * Resolves true on ack, false on timeout or if scrubbing is stopped.
+ * @param {string} partId
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+function waitForAck(partId, timeoutMs) {
+  return new Promise((resolve) => {
+    if (downloadedParts.has(partId)) {
+      resolve(true);
+      return;
+    }
+
+    let done = false;
+    /** @type {number|null} */
+    let intervalId = null;
+    /** @type {(acked: boolean) => void} */
+    const finish = (acked) => {
+      if (done) return;
+      done = true;
+      if (intervalId !== null) clearInterval(intervalId);
+      resolve(acked);
+    };
+
+    /** @type {Array<(acked: boolean) => void>} */
+    const waiters = ackWaiters.get(partId) || [];
+    waiters.push(finish);
+    ackWaiters.set(partId, waiters);
+
+    const deadline = Date.now() + timeoutMs;
+    intervalId = window.setInterval(() => {
+      if (!isScrubbing || Date.now() >= deadline) {
+        finish(false);
+      }
+    }, 250);
+  });
+}
+
+/** @returns {{partId: string, startTime: number, endTime: number}|null} */
+function findNextTrack() {
+  for (const track of trackList) {
+    if (!downloadedParts.has(track.partId) && !gaveUpParts.has(track.partId)) {
+      return track;
+    }
+  }
+  return null;
+}
+
+/** Ensure playback is active (click Play if currently paused). */
+function ensurePlaying() {
+  const playBtn = getPlayButton();
+  if (playBtn) {
+    playBtn.click();
+  }
+}
+
+/** Log and report scrub progress to the background every 5% of the book. */
+function reportProgress() {
+  const total = trackListTotalDuration || totalDurationSeconds || 0;
+  if (total <= 0) return;
+  const elapsed = getTimeInfo().currentSeconds;
+  const percent = Math.min(1, Math.max(0, elapsed / total));
+  const pct = Math.round(percent * 100);
+  if (pct >= lastLoggedPercent + 5) {
+    lastLoggedPercent = pct;
+    console.log("[libby-fetch] Progress:", pct + "% (" + formatDuration(elapsed) + ")");
+    chrome.runtime.sendMessage({ type: "SCRUBBING_PROGRESS", percent });
+  }
+}
+
+/**
+ * Start the manifest-driven scrub loop. Instead of blindly advancing every
+ * 150ms (which skipped short intro tracks and gave up at 99%), we use the
+ * spine's cumulative start times: advance 15s at a time while the next
+ * un-downloaded track is far away, and let playback naturally cross into it
+ * once it is < 15s away, waiting for the download ack each time.
+ * @param {Array<{partId: string, startTime: number, endTime: number}>} tracks
+ * @param {number} totalDuration
+ * @param {Array<string>} initialDownloaded
+ */
+async function startScrubbing(tracks, totalDuration, initialDownloaded) {
   if (isScrubbing) return;
   isScrubbing = true;
-  totalDurationSeconds = 0;
+  trackList = Array.isArray(tracks) ? tracks : [];
+  trackListTotalDuration = totalDuration || 0;
+  downloadedParts = new Set(Array.isArray(initialDownloaded) ? initialDownloaded : []);
+  gaveUpParts.clear();
+  lastLoggedPercent = -1;
+  totalDurationSeconds = totalDuration || 0;
 
-  console.log("[libby-fetch] Starting scrubbing process (15 second advances)");
-  
+  console.log("[libby-fetch] Starting scrubbing process (manifest-driven),", trackList.length, "tracks,", downloadedParts.size, "already downloaded");
+
   // Create progress banner on the page
   createProgressBanner();
 
@@ -405,54 +501,44 @@ async function startScrubbing() {
   // Wait a bit for the first audio to load
   await sleep(2000);
 
-  let lastLoggedPercent = -1;
+  while (isScrubbing) {
+    // Keep playback active in case the user paused mid-scrub.
+    ensurePlaying();
 
-  // Start the scrub loop - advance 15 seconds at a time with short delays
-  scrubInterval = window.setInterval(() => {
-    if (!isScrubbing) {
-      if (scrubInterval) clearInterval(scrubInterval);
-      return;
-    }
-
-    const progress = getProgressPercent();
-    
-    // Log progress every 5%
-    const progressPercent = Math.round(progress * 100);
-    if (progressPercent >= lastLoggedPercent + 5) {
-      lastLoggedPercent = progressPercent;
-      const currentSeconds = totalDurationSeconds > 0 ? progress * totalDurationSeconds : 0;
-      console.log("[libby-fetch] Progress:", progressPercent + "% (" + formatDuration(currentSeconds) + ")");
-      
-      // Report progress to background
-      chrome.runtime.sendMessage({
-        type: "SCRUBBING_PROGRESS",
-        percent: progress,
-      });
-    }
-
-    // Fallback completion check — when we reach the end of the book,
-    // stop scrubbing even if not all spine entries have been collected.
-    // Missing files (e.g. cached by the browser) will be caught by the
-    // background's verifyAndReport() and can be recovered via Fill Gaps.
-    if (progress >= 0.99) {
-      console.log("[libby-fetch] Reached end of audiobook (fallback)");
+    const next = findNextTrack();
+    if (!next) {
+      console.log("[libby-fetch] No more un-downloaded tracks; scrubbing complete");
       stopScrubbing();
       chrome.runtime.sendMessage({ type: "SCRUBBING_COMPLETE" });
       return;
     }
 
-    // Click advance 15 seconds
-    advanceFifteenSeconds();
-  }, 150); // Click every 150ms
+    const elapsed = getTimeInfo().currentSeconds;
+    const distance = next.startTime - elapsed;
+
+    if (distance <= 15) {
+      // Play mode: the next track is close, so let playback cross into it
+      // naturally and wait for the download ack.
+      console.log("[libby-fetch] Track", next.partId, "is", Math.max(0, Math.round(distance * 10) / 10) + "s away — playing into it");
+      const acked = await waitForAck(next.partId, 20000);
+      if (!acked) {
+        console.log("[libby-fetch] Timed out waiting for", next.partId, "— marking as given up");
+        gaveUpParts.add(next.partId);
+      }
+    } else {
+      // Advance mode: jump 15s toward the next boundary. We're far enough
+      // away that a 15s jump can't skip the next track's request.
+      advanceFifteenSeconds();
+      await sleep(200);
+    }
+
+    reportProgress();
+  }
 }
 
 function stopScrubbing() {
   console.log("[libby-fetch] Stopping scrubbing");
   isScrubbing = false;
-  if (scrubInterval) {
-    clearInterval(scrubInterval);
-    scrubInterval = null;
-  }
 }
 
 // Listen for messages from background/popup
@@ -476,7 +562,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     case "START_SCRUBBING":
-      startScrubbing();
+      startScrubbing(message.tracks, message.totalDuration, message.downloadedParts);
+      sendResponse({ success: true });
+      break;
+
+    case "TRACK_DOWNLOADED":
+      downloadedParts.add(message.partId);
+      {
+        const trackWaiters = ackWaiters.get(message.partId);
+        if (trackWaiters) {
+          ackWaiters.delete(message.partId);
+          for (const finish of trackWaiters) finish(true);
+        }
+      }
       sendResponse({ success: true });
       break;
 

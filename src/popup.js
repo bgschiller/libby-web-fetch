@@ -3,6 +3,11 @@
 
 // Popup script for Libby audiobook downloader
 
+const popupLogger = /** @type {any} */ (globalThis).LibbyLogger;
+if (popupLogger) {
+  popupLogger.install("popup", { forward: true });
+}
+
 /** @type {string} */
 let currentKebabTitle = "";
 /** @type {string} */
@@ -260,8 +265,35 @@ async function stopDownload() {
   }
 }
 
+/** Trigger a log export via the background worker. */
+async function downloadLogs() {
+  const btn = /** @type {HTMLButtonElement|null} */ ($("download-logs-btn"));
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Exporting...";
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "EXPORT_LOGS" });
+    console.log("[popup] Log export requested:", response);
+  } catch (error) {
+    console.error("Log export error:", error);
+    showError("Failed to export logs. Try again.");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Download Logs";
+    }
+  }
+}
+
 // Listen for progress updates from background
 chrome.runtime.onMessage.addListener((message) => {
+  // Ignore forwarded log entries; logging/echoing them would duplicate entries
+  // in the background's master log buffer.
+  if (message && message.type === "LOG_ENTRY") {
+    return;
+  }
+
   console.log("[popup] Received message:", message);
 
   if (message.type === "DOWNLOAD_PROGRESS" || message.type === "PROGRESS_UPDATE") {
@@ -288,6 +320,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   $("start-btn")?.addEventListener("click", startDownload);
   $("stop-btn")?.addEventListener("click", stopDownload);
+  $("download-logs-btn")?.addEventListener("click", downloadLogs);
   $("new-download-btn")?.addEventListener("click", () => {
     currentMissingFiles = [];
     showSection("setup-section");

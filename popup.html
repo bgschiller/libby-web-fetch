@@ -91,6 +91,16 @@
       background: #c5221f;
     }
 
+    button.secondary {
+      background: #f1f3f4;
+      color: #333;
+      border: 1px solid #ddd;
+    }
+
+    button.secondary:hover {
+      background: #e8eaed;
+    }
+
     .progress-section {
       background: #e8f5e9;
       padding: 12px;
@@ -254,6 +264,14 @@
     <button id="new-download-btn" class="primary">Start New Download</button>
   </div>
 
+  <div style="margin-top: 16px; border-top: 1px solid #eee; padding-top: 12px;">
+    <button id="download-logs-btn" class="secondary">Download Logs</button>
+    <p style="font-size: 11px; color: #888; margin: 8px 0 0 0;">
+      Having trouble? Download the logs and attach them to your bug report.
+    </p>
+  </div>
+
+  <script src="src/logger.js"></script>
   <script src="src/popup.js"></script>
 </body>
 </html>

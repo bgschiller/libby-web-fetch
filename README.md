@@ -149,6 +149,9 @@ cd ~/Downloads/your-book-folder
 md5 -r *.mp3 | sort | uniq -w32 -d | cut -d' ' -f2 | xargs rm
 ```
 
+### Reporting a bug
+If a book fails to download, click **Download Logs** in the extension popup and attach the generated `.txt` file to your bug report. The logs include the spine/manifest data, scrubbing progress, and any missing files, which makes diagnosing issues much faster.
+
 ## License
 
 MIT

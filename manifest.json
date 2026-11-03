@@ -37,7 +37,7 @@
   "content_scripts": [
     {
       "matches": ["*://*.listen.overdrive.com/*", "*://*.listen.libbyapp.com/*"],
-      "js": ["src/content.js"],
+      "js": ["src/logger.js", "src/content.js"],
       "all_frames": true
     }
   ]

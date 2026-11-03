@@ -1,6 +1,15 @@
 // @ts-check
 /// <reference types="chrome"/>
 
+// @ts-ignore - importScripts is available in the service worker global scope
+importScripts("logger.js");
+
+const bgLogger = /** @type {any} */ (globalThis).LibbyLogger;
+if (bgLogger) {
+  bgLogger.install("background", { persist: true });
+  bgLogger.restorePersisted();
+}
+
 // Background service worker for Libby audiobook downloads
 
 /** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number, spineData: Array<any>, spineByPartId: Object, spineWithTimes: Array<any>, missingFiles: Array<any>, isFillingGaps: boolean, capturedRequests: Array<{tabId: number, url: string, baseUrl: string}>}} */
@@ -530,6 +539,14 @@ function notifyProgress() {
 
 // Handle messages from popup and content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Ingest log entries forwarded from content scripts and the popup without
+  // logging them again (that would recurse and double-count).
+  if (message && message.type === "LOG_ENTRY" && message.entry) {
+    bgLogger.appendEntry(message.entry);
+    sendResponse({ success: true });
+    return false;
+  }
+
   console.log("[libby-fetch] Received message:", message);
 
   switch (message.type) {
@@ -642,6 +659,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         isFillingGaps: state.isFillingGaps,
       });
       break;
+
+    case "EXPORT_LOGS": {
+      const entries = /** @type {Array<{ts: string, level: string, source: string, msg: string}>} */ (bgLogger.getEntries());
+      entries.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+
+      const lines = [
+        "Libby Audiobook Downloader — debug log",
+        "Generated: " + new Date().toISOString(),
+        "Extension version: " + (chrome.runtime.getManifest().version || "unknown"),
+        "Book: " + (state.bookTitle || "(none)"),
+        "Expected files: " + (state.spineData.length || 0),
+        "Downloaded files: " + state.fileCount,
+        "Missing files: " + state.missingFiles.map((f) => f.partId).join(", "),
+        "",
+      ];
+
+      for (const e of entries) {
+        lines.push("[" + e.ts + "] [" + e.level + "] [" + e.source + "] " + e.msg);
+      }
+
+      const text = lines.join("\n");
+      const dataUrl = "data:text/plain;charset=utf-8," + encodeURIComponent(text);
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const bookPrefix = state.kebabTitle ? state.kebabTitle + "-" : "";
+      const filename = "libby-logs-" + bookPrefix + ts + ".txt";
+
+      chrome.downloads.download({ url: dataUrl, filename, conflictAction: "uniquify" }, () => {
+        if (chrome.runtime.lastError) {
+          console.error("[libby-fetch] Log export failed:", chrome.runtime.lastError);
+        }
+      });
+
+      console.log("[libby-fetch] Exported", entries.length, "log entries to", filename);
+      sendResponse({ success: true, entries: entries.length });
+      break;
+    }
 
     case "SCRUBBING_COMPLETE":
       // If background already completed via the file-count check, it already

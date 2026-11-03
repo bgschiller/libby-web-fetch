@@ -3,6 +3,11 @@
 
 // Content script for Libby audiobook pages
 
+const contentLogger = /** @type {any} */ (globalThis).LibbyLogger;
+if (contentLogger) {
+  contentLogger.install("content", { forward: true });
+}
+
 let isScrubbing = false;
 let isFillingGaps = false;
 /** @type {HTMLElement|null} */
@@ -220,6 +225,17 @@ function getPlayButton() {
 function getPauseButton() {
   return document.querySelector('footer button[aria-label="Pause"]') ||
     document.querySelector('button[aria-label="Pause"]');
+}
+
+/** Pause playback so the audiobook doesn't keep playing after the download finishes. */
+function pausePlayback() {
+  const pauseBtn = getPauseButton();
+  if (pauseBtn) {
+    console.log("[libby-fetch] Pausing playback (download finished)");
+    pauseBtn.click();
+  } else {
+    console.log("[libby-fetch] No Pause button found; playback may keep playing");
+  }
 }
 
 /** @returns {HTMLElement|null} */
@@ -509,6 +525,7 @@ async function startScrubbing(tracks, totalDuration, initialDownloaded) {
     if (!next) {
       console.log("[libby-fetch] No more un-downloaded tracks; scrubbing complete");
       stopScrubbing();
+      pausePlayback();
       chrome.runtime.sendMessage({ type: "SCRUBBING_COMPLETE" });
       return;
     }
@@ -588,6 +605,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       updateProgressBanner(message.fileCount, message.percent || 0);
       if (!message.isDownloading && message.fileCount > 0) {
         stopScrubbing();
+        pausePlayback();
         showCompleteBanner(message.fileCount);
       }
       sendResponse({ success: true });
@@ -595,6 +613,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case "DOWNLOAD_COMPLETE":
       stopScrubbing();
+      pausePlayback();
       if (message.missingFiles && message.missingFiles.length > 0) {
         showCompleteBanner(message.fileCount, message.missingFiles);
       } else {

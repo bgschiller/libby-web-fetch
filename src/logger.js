@@ -6,14 +6,15 @@
  *
  * Every extension context (background service worker, content script, popup)
  * calls LibbyLogger.install() with a source name. Console output is captured
- * into a rolling in-memory buffer. Content scripts and the popup forward their
+ * into a rolling buffer that persists to chrome.storage.local (survives
+ * browser restarts, ~10MB quota). Content scripts and the popup forward their
  * entries to the background worker, which keeps the master buffer, so the
  * "Download Logs" button can export one complete file for bug reports.
  */
 (function () {
   "use strict";
 
-  const MAX_ENTRIES = 2000;
+  const MAX_ENTRIES = 50000;
   const STORAGE_KEY = "libbyLogBuffer";
 
   /** @type {Array<{ts: string, level: string, source: string, msg: string}>} */
@@ -91,8 +92,8 @@
     persistTimer = setTimeout(function () {
       persistTimer = null;
       try {
-        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
-          chrome.storage.session.set({ [STORAGE_KEY]: buffer }).catch(function () {});
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+          chrome.storage.local.set({ [STORAGE_KEY]: buffer }).catch(function () {});
         }
       } catch (e) {
         /* ignore */
@@ -107,8 +108,8 @@
   function restorePersisted() {
     if (!persist) return Promise.resolve();
     try {
-      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
-        return chrome.storage.session.get(STORAGE_KEY).then(function (result) {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        return chrome.storage.local.get(STORAGE_KEY).then(function (result) {
           const stored = result ? result[STORAGE_KEY] : null;
           if (Array.isArray(stored)) {
             buffer = stored.concat(buffer).slice(-MAX_ENTRIES);

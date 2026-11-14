@@ -596,6 +596,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Clear any existing block rules from previous downloads
       clearBlockRules();
 
+      // Start a fresh log buffer for this book so entries from a previous
+      // download don't bleed into this one.
+      bgLogger.clear();
+
       state.isDownloading = true;
       state.bookTitle = message.bookTitle;
       state.kebabTitle = toKebabCase(message.bookTitle);

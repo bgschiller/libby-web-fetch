@@ -86,7 +86,7 @@ async function init() {
   // Check current download status
   const status = await chrome.runtime.sendMessage({ type: "GET_STATUS" });
 
-  if (status.isDownloading || status.isFillingGaps) {
+  if (status.isDownloading) {
     showSection("progress-section");
     updateProgress(status.fileCount, status.percent || 0);
     currentKebabTitle = status.kebabTitle;
@@ -181,24 +181,6 @@ function showComplete(totalFiles, expectedCount, missingFiles) {
     } else {
       totalFilesEl.textContent = String(totalFiles);
     }
-  }
-
-  // Show/hide gap-fill UI
-  const gapSection = $("gap-section");
-  const missingFilesList = $("missing-files-list");
-  const fillGapsBtn = $("fill-gaps-btn");
-
-  if (gapSection && missingFiles && missingFiles.length > 0) {
-    gapSection.classList.remove("hidden");
-    if (missingFilesList) {
-      missingFilesList.textContent = missingFiles.map(f => f.filename).join("\n");
-    }
-    if (fillGapsBtn) {
-      fillGapsBtn.disabled = false;
-      fillGapsBtn.textContent = `Fill ${missingFiles.length} Gap${missingFiles.length > 1 ? 's' : ''}`;
-    }
-  } else if (gapSection) {
-    gapSection.classList.add("hidden");
   }
   const commandEl = $("validation-command");
   const expectedEl = $("expected-duration");
@@ -324,28 +306,6 @@ document.addEventListener("DOMContentLoaded", () => {
   $("new-download-btn")?.addEventListener("click", () => {
     currentMissingFiles = [];
     showSection("setup-section");
-  });
-
-  // Fill gaps button
-  $("fill-gaps-btn")?.addEventListener("click", async () => {
-    const btn = /** @type {HTMLButtonElement} */ ($("fill-gaps-btn"));
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "Filling gaps...";
-    }
-
-    try {
-      await chrome.runtime.sendMessage({ type: "FILL_GAPS" });
-    } catch (error) {
-      console.error("Fill gaps error:", error);
-      showError("Failed to fill gaps. Make sure the Libby page is still open.");
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = currentMissingFiles.length > 0
-          ? `Fill ${currentMissingFiles.length} Gap${currentMissingFiles.length > 1 ? 's' : ''}`
-          : "Fill Gaps";
-      }
-    }
   });
 
   // Update kebab title when folder name changes

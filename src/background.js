@@ -12,7 +12,7 @@ if (bgLogger) {
 
 // Background service worker for Libby audiobook downloads
 
-/** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number, spineData: Array<any>, spineByPartId: Object, spineWithTimes: Array<any>, missingFiles: Array<any>, isFillingGaps: boolean, capturedRequests: Array<{tabId: number, url: string, baseUrl: string}>}} */
+/** @type {{isDownloading: boolean, bookTitle: string, kebabTitle: string, downloadedUrls: Set<string>, pendingUrls: Set<string>, fileCount: number, tabId: number|null, currentPercent: number, expectedDuration: string, nextRuleId: number, spineData: Array<any>, spineByPartId: Object, spineWithTimes: Array<any>, missingFiles: Array<any>, capturedRequests: Array<{tabId: number, url: string, baseUrl: string}>}} */
 const state = {
   isDownloading: false,
   bookTitle: "",
@@ -28,7 +28,6 @@ const state = {
   spineByPartId: {},
   spineWithTimes: [],  // spine entries with cumulative start times, for gap detection
   missingFiles: [],     // files declared in manifest but not downloaded
-  isFillingGaps: false,
   capturedRequests: [],
 };
 
@@ -416,7 +415,7 @@ function completeDownload() {
  * @param {string} baseUrl
  */
 function handleAudioRequest(url, baseUrl) {
-  if (!state.isDownloading && !state.isFillingGaps) return;
+  if (!state.isDownloading) return;
 
   // Check if we've already downloaded or are currently processing this URL
   if (state.downloadedUrls.has(baseUrl) || state.pendingUrls.has(baseUrl)) {
@@ -496,7 +495,7 @@ function processCapturedRequests(tabId) {
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     const baseUrl = getBaseUrl(details.url);
-    const shouldDownload = state.isDownloading || state.isFillingGaps;
+    const shouldDownload = state.isDownloading;
 
     // Capture requests immediately so we don't miss the first part of the book,
     // which Libby requests when the player loads (before the user clicks Start).
@@ -656,7 +655,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         expectedDuration: state.expectedDuration,
         expectedCount: state.spineWithTimes.length,
         missingFiles: state.missingFiles,
-        isFillingGaps: state.isFillingGaps,
       });
       break;
 
@@ -711,39 +709,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       verifyAndReport();
       notifyProgress();
-      sendResponse({ success: true });
-      break;
-
-    case "FILL_GAPS":
-      if (state.missingFiles.length === 0) {
-        console.log("[libby-fetch] No gaps to fill");
-        sendResponse({ success: true, filled: 0 });
-        break;
-      }
-
-      console.log("[libby-fetch] Filling", state.missingFiles.length, "gaps:", state.missingFiles.map(f => f.partId));
-      state.isFillingGaps = true;
-
-      // Tell content script to seek to each missing part
-      if (state.tabId) {
-        const totalDuration = state.spineWithTimes[state.spineWithTimes.length - 1]?.endTime || 0;
-        chrome.tabs.sendMessage(state.tabId, {
-          type: "FILL_GAPS",
-          missingParts: state.missingFiles,
-          totalDuration,
-        }).catch(err => {
-          console.error("[libby-fetch] Failed to send FILL_GAPS to content script:", err);
-          sendResponse({ success: false, error: err.message });
-        });
-      }
-
-      sendResponse({ success: true });
-      break;
-
-    case "GAP_FILL_COMPLETE":
-      state.isFillingGaps = false;
-      console.log("[libby-fetch] Gap fill complete, re-verifying");
-      verifyAndReport();
       sendResponse({ success: true });
       break;
 

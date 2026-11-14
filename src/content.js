@@ -9,7 +9,6 @@ if (contentLogger) {
 }
 
 let isScrubbing = false;
-let isFillingGaps = false;
 /** @type {HTMLElement|null} */
 let progressBanner = null;
 /** @type {number} */
@@ -144,78 +143,6 @@ function formatDuration(seconds) {
 }
 
 /** @returns {HTMLElement|null} */
-function getSeekometer() {
-  return document.querySelector(".seekometer");
-}
-
-/**
- * Seek to a percentage position in the audiobook by simulating a click
- * on the progress bar. Tries multiple selectors to handle Libby's changing markup.
- * @param {number} percent - Value between 0 and 1
- * @returns {Promise<boolean>} true if seek was attempted
- */
-async function seekToPercent(percent) {
-  const target = Math.max(0, Math.min(1, percent));
-
-  // Try multiple selectors for the seek bar / timeline track,
-  // because Libby's player markup has changed over time.
-  const selectors = [
-    ".seekometer",
-    ".timeline-track",
-    "[class*='timeline'] [class*='track']",
-    "[class*='progress'] [class*='bar']",
-    "input[type='range']",
-  ];
-
-  /** @type {HTMLElement|null} */
-  let seekBar = null;
-  for (const sel of selectors) {
-    seekBar = document.querySelector(sel);
-    if (seekBar) break;
-  }
-
-  if (!seekBar) {
-    console.log("[libby-fetch] seekToPercent: no seek bar found");
-    return false;
-  }
-
-  const rect = seekBar.getBoundingClientRect();
-  const x = rect.left + rect.width * target;
-  const y = rect.top + rect.height / 2;
-
-  console.log("[libby-fetch] seekToPercent:", Math.round(target * 100) + "%", "at x=" + Math.round(x) + " y=" + Math.round(y));
-
-  const eventOpts = {
-    bubbles: true,
-    cancelable: true,
-    view: window,
-    clientX: x,
-    clientY: y,
-    screenX: x,
-    screenY: y,
-    button: 0,
-  };
-
-  // Dispatch full mouse event sequence so the player recognizes the seek
-  seekBar.dispatchEvent(new MouseEvent("mousedown", eventOpts));
-  seekBar.dispatchEvent(new MouseEvent("mouseup", eventOpts));
-  seekBar.dispatchEvent(new MouseEvent("click", eventOpts));
-
-  // For <input type="range"> elements, dispatch an input event too
-  if (seekBar.tagName === "INPUT" && seekBar.getAttribute("type") === "range") {
-    // Set the value directly as well
-    const inputEl = /** @type {HTMLInputElement} */ (seekBar);
-    const range = inputEl.max ? parseFloat(inputEl.max) - (parseFloat(inputEl.min) || 0) : 1;
-    inputEl.value = String(parseFloat(inputEl.min || "0") + range * target);
-    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-    inputEl.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
-  await sleep(300);
-  return true;
-}
-
-/** @returns {HTMLElement|null} */
 function getPlayButton() {
   return document.querySelector('footer button[aria-label="Play"]') ||
     document.querySelector('button[aria-label="Play"]');
@@ -307,6 +234,13 @@ function getAdvance15Button() {
   );
 }
 
+/** @returns {HTMLElement|null} */
+function getBack15Button() {
+  return /** @type {HTMLElement|null} */ (
+    document.querySelector('button[aria-label="Rewind 15 seconds"]')
+  );
+}
+
 /**
  * @param {number} ms
  * @returns {Promise<void>}
@@ -335,6 +269,20 @@ function advanceFifteenSeconds() {
     return true;
   }
   console.log("[libby-fetch] Advance 15 seconds button not found");
+  return false;
+}
+
+/**
+ * Click the Back 15 seconds button
+ * @returns {boolean} true if button was clicked
+ */
+function backFifteenSeconds() {
+  const btn = getBack15Button();
+  if (btn) {
+    btn.click();
+    return true;
+  }
+  console.log("[libby-fetch] Rewind 15 seconds button not found");
   return false;
 }
 
@@ -385,10 +333,9 @@ async function restartAudiobook() {
         }
       }
     } else {
-      // Method 3: Seek to 0% on seekometer
-      console.log("[libby-fetch] Seeking to start via seekometer...");
-      await seekToPercent(0.001);
-      await sleep(2000);
+      // Could not find a start button or Table of Contents. Playback is
+      // already rewound as far as the UI allows; skip ahead to scrubbing.
+      console.log("[libby-fetch] Could not locate start button or TOC; continuing from current position");
     }
   }
 
@@ -491,7 +438,7 @@ function reportProgress() {
  * 150ms (which skipped short intro tracks and gave up at 99%), we use the
  * spine's cumulative start times: advance 15s at a time while the next
  * un-downloaded track is far away, and let playback naturally cross into it
- * once it is < 15s away, waiting for the download ack each time.
+ * once it is < 40s away, waiting for the download ack each time.
  * @param {Array<{partId: string, startTime: number, endTime: number}>} tracks
  * @param {number} totalDuration
  * @param {Array<string>} initialDownloaded
@@ -533,9 +480,26 @@ async function startScrubbing(tracks, totalDuration, initialDownloaded) {
     const elapsed = getTimeInfo().currentSeconds;
     const distance = next.startTime - elapsed;
 
-    if (distance <= 15) {
-      // Play mode: the next track is close, so let playback cross into it
-      // naturally and wait for the download ack.
+    // If we've already advanced past the entire un-downloaded track (e.g. a
+    // short track that a single +15s hop skipped over), rewind 15s and play
+    // in real time to let its audio request fire.
+    if (elapsed > next.endTime) {
+      console.log(
+        "[libby-fetch] Overshot", next.partId,
+        "(track ends at", Math.round(next.endTime) + "s, now at", Math.round(elapsed) + "s)",
+        "— rewinding 15s and playing in real time"
+      );
+      backFifteenSeconds();
+      await sleep(300);
+      // Now play into it instead of hopping again.
+      const acked = await waitForAck(next.partId, 20000);
+      if (!acked) {
+        console.log("[libby-fetch] Timed out waiting for", next.partId, "— marking as given up");
+        gaveUpParts.add(next.partId);
+      }
+    } else if (distance <= 40) {
+      // Play mode: the next track is close enough (within 40s) that we just
+      // let playback cross into it naturally and wait for the download ack.
       console.log("[libby-fetch] Track", next.partId, "is", Math.max(0, Math.round(distance * 10) / 10) + "s away — playing into it");
       const acked = await waitForAck(next.partId, 20000);
       if (!acked) {
@@ -619,11 +583,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } else {
         showCompleteBanner(message.fileCount);
       }
-      sendResponse({ success: true });
-      break;
-
-    case "FILL_GAPS":
-      fillGaps(message.missingParts, message.totalDuration);
       sendResponse({ success: true });
       break;
   }
@@ -794,64 +753,6 @@ function removeProgressBanner() {
     progressBanner.remove();
     progressBanner = null;
   }
-}
-
-/**
- * Fill gaps by seeking to each missing part's time range and waiting for the
- * audio request to be intercepted by the background worker.
- * @param {Array<{partId: string, startTime: number, duration: number}>} missingParts
- * @param {number} totalDuration
- */
-async function fillGaps(missingParts, totalDuration) {
-  if (isFillingGaps) {
-    console.log("[libby-fetch] Already filling gaps, ignoring");
-    return;
-  }
-
-  isFillingGaps = true;
-  console.log("[libby-fetch] Starting gap fill for", missingParts.length, "missing parts");
-
-  // Ensure playback is active
-  const playBtn = getPlayButton();
-  if (playBtn) {
-    playBtn.click();
-    await sleep(500);
-  }
-
-  for (const part of missingParts) {
-    if (!isFillingGaps) {
-      console.log("[libby-fetch] Gap fill cancelled");
-      break;
-    }
-
-    // Seek to slightly past the start of the missing part to trigger its audio request.
-    // Seeking to the exact start might still hit a cached boundary, so add a 2s offset.
-    const seekSeconds = part.startTime + Math.min(2, part.duration * 0.15);
-    const percent = totalDuration > 0 ? seekSeconds / totalDuration : 0;
-
-    console.log(
-      "[libby-fetch] Filling gap:", part.partId,
-      "→ seeking to", Math.round(seekSeconds) + "s",
-      "(" + Math.round(percent * 100) + "%)"
-    );
-
-    await seekToPercent(percent);
-
-    // Wait for the player to buffer and request the audio from the CDN.
-    // The background worker's webRequest listener will capture and download it.
-    await sleep(3000);
-  }
-
-  isFillingGaps = false;
-  console.log("[libby-fetch] Gap fill loop complete, notifying background");
-
-  // Re-pause playback
-  const pauseBtn = getPauseButton();
-  if (pauseBtn) {
-    pauseBtn.click();
-  }
-
-  chrome.runtime.sendMessage({ type: "GAP_FILL_COMPLETE" });
 }
 
 console.log("[libby-fetch] Content script loaded on", window.location.href);

@@ -152,6 +152,15 @@ md5 -r *.mp3 | sort | uniq -w32 -d | cut -d' ' -f2 | xargs rm
 ### Reporting a bug
 If a book fails to download, click **Download Logs** in the extension popup and attach the generated `.txt` file to your bug report. The logs include the spine/manifest data, scrubbing progress, and any missing files, which makes diagnosing issues much faster.
 
+### Firefox / Zen
+
+The same code also loads in Firefox-based browsers (tried on Zen).
+
+1. Open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on…**, and pick `manifest.json`. A temporary add-on is removed when the browser restarts; for a permanent install, sign it as an unlisted add-on on addons.mozilla.org.
+2. In `about:addons`, open the extension's **Permissions** tab and turn on every optional site permission. Firefox does not grant host permissions automatically, and the two audio hosts are easy to miss.
+3. If playback never starts, Firefox may be blocking the extension's script-initiated Play click. Try allowing audio autoplay for `libbyapp.com`.
+4. Keep the Libby tab in the foreground while it runs.
+
 ## License
 
 MIT

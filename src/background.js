@@ -1,8 +1,13 @@
 // @ts-check
 /// <reference types="chrome"/>
 
-// @ts-ignore - importScripts is available in the service worker global scope
-importScripts("logger.js");
+// Chrome loads this file as a service worker and pulls in logger.js here.
+// Firefox loads it as an event page, where manifest background.scripts already
+// loads logger.js first and importScripts does not exist.
+if (typeof importScripts === "function") {
+  // @ts-ignore - importScripts is available in the service worker global scope
+  importScripts("logger.js");
+}
 
 const bgLogger = /** @type {any} */ (globalThis).LibbyLogger;
 if (bgLogger) {

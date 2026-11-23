@@ -18,8 +18,15 @@
     "*://odrmediaclips.cachefly.net/*",
     "*://audioclips.cdn.overdrive.com/*"
   ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "libby-web-fetch@colinedwardwood.github.io",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  },
   "background": {
-    "service_worker": "src/background.js"
+    "service_worker": "src/background.js",
+    "scripts": ["src/logger.js", "src/background.js"]
   },
   "action": {
     "default_popup": "popup.html",

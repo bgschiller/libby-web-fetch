@@ -622,20 +622,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: true, kebabTitle: state.kebabTitle });
 
       // Load spine, download manifest, process any pre-start requests, then start scrubbing
-      loadSpineData(message.tabId).then(() => {
-        downloadManifest();
-        processCapturedRequests(message.tabId);
-        if (state.tabId) {
-          chrome.tabs.sendMessage(state.tabId, {
-            type: "START_SCRUBBING",
-            tracks: buildTrackList(),
-            totalDuration: state.spineWithTimes.length > 0
-              ? state.spineWithTimes[state.spineWithTimes.length - 1].endTime
-              : 0,
-            downloadedParts: Array.from(state.downloadedUrls),
-          });
+      // Each step is isolated so one failure can't swallow START_SCRUBBING.
+      (async () => {
+        console.log("[libby-fetch] START step 1: loading spine for tab", message.tabId);
+        /** @type {ReturnType<typeof setTimeout>|undefined} */
+        let spineTimer;
+        await Promise.race([
+          loadSpineData(message.tabId),
+          new Promise((resolve) => {
+            spineTimer = setTimeout(() => {
+              console.error("[libby-fetch] Spine load timed out after 8s; continuing without it");
+              resolve(undefined);
+            }, 8000);
+          }),
+        ]);
+        clearTimeout(spineTimer);
+
+        try {
+          console.log("[libby-fetch] START step 2: downloading manifest");
+          downloadManifest();
+        } catch (err) {
+          console.error("[libby-fetch] downloadManifest threw:", err);
         }
-      });
+
+        try {
+          console.log("[libby-fetch] START step 3: processing captured requests");
+          processCapturedRequests(message.tabId);
+        } catch (err) {
+          console.error("[libby-fetch] processCapturedRequests threw:", err);
+        }
+
+        try {
+          console.log("[libby-fetch] START step 4: sending START_SCRUBBING to tab", state.tabId);
+          if (state.tabId !== null && state.tabId !== undefined) {
+            await chrome.tabs.sendMessage(state.tabId, {
+              type: "START_SCRUBBING",
+              tracks: buildTrackList(),
+              totalDuration: state.spineWithTimes.length > 0
+                ? state.spineWithTimes[state.spineWithTimes.length - 1].endTime
+                : 0,
+              downloadedParts: Array.from(state.downloadedUrls),
+            });
+            console.log("[libby-fetch] START step 4: tab acknowledged START_SCRUBBING");
+          }
+        } catch (err) {
+          console.error("[libby-fetch] Failed to send START_SCRUBBING:", err);
+        }
+      })();
 
       return true; // Keep channel open for async response
 
